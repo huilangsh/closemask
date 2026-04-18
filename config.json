@@ -1,0 +1,17 @@
+{
+  "llm_url": "https://api.openai.com",
+  "port": 8846,
+  "storage_type": "layered",
+  "data_dir": "./data/sessions",
+  "message_ttl": "24h",
+  "session_ttl": "24h",
+  "max_messages_per_session": 100,
+  "mask_fail_strategy": "pass",
+  "max_placeholders_per_session": 500,
+  "local_mask_level": "aggressive",
+  "pii_engine": "auto",
+  "log_to_file": true,
+  "placeholder_hash_length": 6,
+  "placeholder_hmac_key": "",
+  "log_level": "info"
+}

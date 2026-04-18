@@ -1,0 +1,89 @@
+# 隐含敏感数据测试场景
+
+## 场景1：企业级API密钥
+
+**开发人员**：需要配置阿里云OSS。AccessKey ID是LTAI5txxxxxxxxxxxxxxxx，AccessKey Secret是xxxxxYYYYYzzzzzWWWWWvvvvvuuuuuttssssrrrrqqqqpppp。
+
+**DevOps工程师**：好的。数据库连接：prod-db.internal.com:3306，用户名app_user，密码MyP@ssw0rd2025!。
+
+**开发人员**：还有Redis：redis-cluster.internal.com:6379，密码RedisSecure123!@#。
+
+**DevOps工程师**：RabbitMQ：mq.internal.com:5672，用户名mq_admin，密码RabbitPass456$%^。
+
+**开发人员**：Elasticsearch：es.internal.com:9200，用户名elastic，密码ElasticSecure789!@#。
+
+**DevOps工程师**：Prometheus：monitoring.internal.com:9090，用户名prometheus，密码Promo123!@#。
+
+---
+
+## 场景2：金融支付配置
+
+**支付工程师**：微信支付。商户号1234567890，API密钥abcdefghijklmnopqrstuvwxyz0123456789，证书序列号1234567890ABCDEF，证书密码CertP@ss123!。
+
+**技术负责人**：支付宝。应用ID2021001234567890，应用私钥MIIEowIBAAKCAQEA2p8kX6YpJm3nN2w0v4y5z6b7c8d9e0f1g2h3i4j5k6l7m8n9o0p1。
+
+**支付工程师**：银联支付。商户号898110113990005，证书私钥-----BEGIN RSA PRIVATE KEY-----MIIEowIBAAKCAQEAxxxxx。
+
+**技术负责人**：Stripe。Secret Keysk_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx，Publishable Keypk_live_xxxxxxxxxxxxxxxxxxxxxxxxx。
+
+---
+
+## 场景3：AWS云服务配置
+
+**云工程师**：AWS配置。Access Key ID是AKIAIOSFODNN7EXAMPLE，Secret Access Key是wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY，Session Token是FwoGZXIvYXdzEBYaDG5jRkG1lI2YXRhCmNmLWIwZTVlLTNiNDYtMjYzYi0yYWIwZTc1ODZjYjYQFDIvMTIzNDU2Nzg5MC8xMjM0NTY3ODkwLzEyMzQ1Njc4OTBDBz4v0M6n6l9V8Y5Z4W2X1Q7K3L0J4M6N5O1P3Q8R2S9T0U1V2W3X4Y5Z6Q7R8S9T0U1V2W3X4Y5Z6。
+
+**架构师**：Subscription ID是12345678-1234-1234-1234-123456789012，Client ID是abcdef01-2345-6789-0123-456789abcdef，Client Secret是abc123~def456-ghi789-jkl012-mno345-pqr678，Tenant ID是87654321-4321-4321-4321-210987654321。
+
+**云工程师**：GCP项目ID是my-project-123456，Service Account Key是{{"type":"service_account","project_id":"my-project-123456","private_key_id":"key1","private_key":"-----BEGIN RSA PRIVATE KEY-----MIIEowIBAAKCAQEAxxxxx}}。
+
+---
+
+## 场景4：第三方服务集成
+
+**后端工程师**：OpenAI API。API Key是sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx，Organization ID是org-xxxxxxxxxxxxxxxxxxxx。
+
+**产品经理**：Twilio短信。Account SID是ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx，Auth Token是yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy。
+
+**后端工程师**：SendGrid邮件。API Key是SG.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx。
+
+**产品经理**：GitHub集成。Personal Access Token是ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx，Webhook Secret是whsec_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx。
+
+**后端工程师**：Slack Bot。Bot Token是xoxb-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx，Signing Secret是xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx。
+
+---
+
+## 场景5：企业内部系统
+
+**运维工程师**：Jenkins服务器。地址是jenkins.internal.com:8080，管理员用户名admin，密码JenkinsAdmin@2025，API Token是11e3c5f0b9c7a1d4e8f2a3b5c6d7e8f9。
+
+**开发人员**：SonarQube代码质量。地址是sonar.internal.com:9000，用户名sonar_admin，密码SonarAdmin@2025，Token是sqr_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6。
+
+**运维工程师**：Harbor镜像仓库。地址是harbor.internal.com，管理员admin，密码Harbor@2025，Secret是dck_1234567890abcdefghijklmnopqrstuvwxyz。
+
+**开发人员**：Nexus仓库。地址是nexus.internal.com:8081，管理员admin，密码Nexus@2025，User Token是nxp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx。
+
+---
+
+## 测试要点
+
+以上场景包含以下隐含敏感数据：
+- **API Key**：sk-proj-xxx, SG.xxx, ACxxx, ghp_xxx等格式
+- **Access Key**：LTAI5txxxx, AKIAIxxxxx等格式
+- **Secret Key**：wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+- **Session Token**：长格式JWT Token
+- **证书私钥**：-----BEGIN RSA PRIVATE KEY-----开头的RSA私钥
+- **数据库密码**：MyP@ssw0rd2025!
+- **Redis密码**：RedisSecure123!@#
+- **SSH私钥**：MIIEowIBAAKCAQEA开头的Base64编码私钥
+- **Webhook Secret**：whsec_xxx格式
+- **Bot Token**：xoxb-xxx格式
+- **OAuth Token**：Bearer eyJhbGciOiJIUzI1NiIs格式
+- **UUID**：12345678-1234-1234-1234-123456789012格式
+- **Organization ID**：org-xxx格式
+- **Account SID**：ACxxx格式
+
+这些信息在真实AI工作场景中经常出现，需要验证：
+1. 不同格式的API Key能正确识别
+2. 证书、私钥等长格式敏感信息能遮罩
+3. UUID、JWT等标准格式能识别
+4. 同一敏感信息多次出现保持占位符一致
