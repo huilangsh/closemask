@@ -8,7 +8,7 @@
 
 CloseMask is a lightweight middleware proxy that sits between your AI agents and third-party LLM API services, automatically masking Personally Identifiable Information (PII) and technical credentials before data leaves your infrastructure — ensuring privacy compliance while maintaining conversational continuity.
 
-**Why CloseMask?** When you use third-party LLM APIs (OpenAI, Anthropic, Azure, etc.), every request you send potentially exposes sensitive data — API keys, phone numbers, ID cards, bank accounts — to external servers. CloseMask acts as a protective shield: it intercepts outgoing requests, masks all PII and credentials with deterministic placeholders, forwards the sanitized data to the LLM, then transparently restores original values in responses. Your users and agents never notice the difference, but your sensitive data never reaches a third party.
+**Why CloseMask?** With the proliferation of token-based API proxies and relay services — many of which operate in regulatory gray areas — your sensitive data is at risk every time you call an LLM API. CloseMask acts as a privacy shield: it intercepts outgoing requests, masks all PII and credentials with deterministic placeholders, forwards the sanitized data to the LLM, then transparently restores original values in responses. Your users and agents never notice the difference, but your sensitive data never reaches third-party services.
 
 **Key Features:**
 - **Zero-dependency**: Built-in credential masking + PII detection, works out of the box
@@ -24,7 +24,7 @@ CloseMask is a lightweight middleware proxy that sits between your AI agents and
 
 CloseMask 是一个轻量级中间件代理，部署在你的 AI Agent 和第三方 LLM API 服务之间，在数据离开你的基础设施之前自动遮罩个人身份信息（PII）和技术凭证——确保隐私合规的同时保持对话连续性。
 
-**为什么需要 CloseMask？** 当你使用第三方 LLM API（OpenAI、Anthropic、Azure 等）时，每一条请求都可能将敏感数据——API Key、手机号、身份证号、银行卡号——暴露给外部服务器。CloseMask 就像一面防护盾：拦截发出的请求，用确定性占位符替换所有 PII 和凭据，将脱敏后的数据转发给 LLM，然后在响应中透明地还原原始值。你的用户和 Agent 完全感知不到差异，但你的敏感数据永远不会到达第三方。
+**为什么需要 CloseMask？** 随着 Token 搬运代理服务的泛滥，许多中转 API 存在合规风险，每次调用 LLM API 都可能泄露你的敏感数据。CloseMask 就像一面隐私防护盾：拦截发出的请求，用确定性占位符替换所有 PII 和凭据，将脱敏后的数据转发给 LLM，然后在响应中透明地还原原始值。你的用户和 Agent 完全感知不到差异，但敏感数据永远不会泄露给第三方服务。
 
 **核心特性：**
 - **开箱即用**：内置凭据遮罩 + PII 检测，无需外部依赖
@@ -56,9 +56,75 @@ closemask.exe -config config.json
 最小配置：
 ```json
 {
-  "llm_url": "http://localhost:11434"
+  "llm_url": "http://localhost:11434/v1/chat/completions"
 }
 ```
+
+## 工作原理示例
+
+### 示例 1：用户对话中的 PII 遮罩
+
+**用户输入：**
+```
+我的身份证号是 110101199003077777，手机号 13812345678，帮我查一下订单
+```
+
+**CloseMask 遮罩后发送给 LLM：**
+```
+我的身份证号是 ${ID_CARD_a1b2c3}，手机号 ${PHONE_d4e5f6}，帮我查一下订单
+```
+
+**LLM 响应：**
+```
+好的，已为您查询到 ${ID_CARD_a1b2c3} 的订单信息...
+```
+
+**CloseMask 还原后返回给用户：**
+```
+好的，已为您查询到 110101199003077777 的订单信息...
+```
+
+### 示例 2：开发者调试时的凭据遮罩
+
+**开发者输入：**
+```
+帮我看看这段代码有什么问题：
+OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwx123456
+DATABASE_URL=postgres://admin:secret123@db.example.com:5432/mydb
+```
+
+**CloseMask 遮罩后：**
+```
+帮我看看这段代码有什么问题：
+OPENAI_API_KEY=${CRED_x7y8z9}
+DATABASE_URL=postgres://admin:${CRED_m1n2o3}@db.example.com:5432/mydb
+```
+
+**LLM 只看到占位符，真实凭据不会泄露。**
+
+### 示例 3：Agent 工具调用
+
+**用户：** 搜索身份证号 110101199003077777 的用户
+
+**CloseMask 遮罩后 LLM 生成工具调用：**
+```json
+{
+  "function": "search_user",
+  "arguments": {"id_card": "${ID_CARD_a1b2c3}"}
+}
+```
+
+**CloseMask 还原后实际执行：**
+```json
+{
+  "function": "search_user",
+  "arguments": {"id_card": "110101199003077777"}
+}
+```
+
+工具正常工作，数据库查询成功，全程 LLM 未接触真实 PII。
+
+---
 
 ### 完整环境（含 Mock 服务测试）
 
