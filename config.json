@@ -1,9 +1,0 @@
-{
-  "oneaifw_url": "http://localhost:8845",
-  "llm_url": "http://localhost:11434",
-  "port": 8846,
-  "storage_type": "memory",
-  "session_ttl": "2h",
-  "message_ttl": "24h",
-  "max_messages_per_session": 100
-}
