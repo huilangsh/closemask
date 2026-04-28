@@ -229,7 +229,7 @@ Create a `config.json` file:
 ```json
 {
   "oneaifw_url": "http://localhost:8845",
-  "llm_url": "http://localhost:11434",
+  "llm_url": "http://localhost:11434/v1",
   "port": 8846,
   "storage_type": "memory",
   "session_ttl": "2h",
@@ -247,17 +247,21 @@ Create a `config.json` file:
 
 ## LLM Provider Compatibility
 
-CloseMask uses the **OpenAI-compatible protocol** and supports all OpenAI-compatible LLM providers. **`llm_url` must be the complete endpoint URL**:
+CloseMask uses the **OpenAI-compatible protocol** and supports all OpenAI-compatible LLM providers.
 
-| Provider | `llm_url` Configuration |
-|----------|------------------------|
-| **OpenAI** | `https://api.openai.com/v1/chat/completions` |
-| **Ollama** | `http://localhost:11434/v1/chat/completions` |
-| **Groq** | `https://api.groq.com/openai/v1/chat/completions` |
-| **DeepSeek** | `https://api.deepseek.com/chat/completions` |
-| **Qwen (Alibaba Cloud)** | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` |
-| **Moonshot Kimi** | `https://api.moonshot.cn/v1/chat/completions` |
-| **Zhipu GLM** | `https://open.bigmodel.cn/api/coding/paas/v4/chat/completions` |
+**`llm_url` is the base URL. CloseMask automatically appends `/chat/completions`.**
+
+| Provider | `llm_url` Configuration Example |
+|----------|--------------------------------|
+| **OpenAI** | `https://api.openai.com/v1` |
+| **Ollama** | `http://localhost:11434/v1` |
+| **Groq** | `https://api.groq.com/openai/v1` |
+| **DeepSeek** | `https://api.deepseek.com` |
+| **Qwen (Alibaba Cloud)** | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| **Baidu Qianfan Coding** | `https://qianfan.baidubce.com/v2/coding` |
+| **JD Cloud Coding** | `https://modelservice.jdcloud.com/coding/openai/v1` |
+| **Moonshot Kimi** | `https://api.moonshot.cn/v1` |
+| **Zhipu GLM** | `https://open.bigmodel.cn/api/coding/paas/v4` |
 | **Azure OpenAI** | See below |
 | **Anthropic Claude** | Via OpenAI-compatible proxy (see below) |
 | **Other** | Check official docs, use complete endpoint URL |

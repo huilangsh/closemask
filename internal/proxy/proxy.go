@@ -9,10 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,7 +37,6 @@ const (
 
 // Config 代理配置
 type Config struct {
-	OneAIFWURL             string `json:"oneaifw_url"`
 	LLMURL                 string `json:"llm_url"`
 	Port                   int    `json:"port"`
 	StorageType            string `json:"storage_type"`        // "memory", "redis", "layered", "disk"
@@ -55,11 +50,28 @@ type Config struct {
 	MaskFailStrategy       string `json:"mask_fail_strategy"`  // "block", "redact", "passthrough"
 	MaxPlaceholdersPerSession int `json:"max_placeholders_per_session"` // 单会话最大占位符数
 	LocalMaskLevel         string `json:"local_mask_level"`    // "strict", "aggressive", "off"
-	PIIEngine              string `json:"pii_engine"`          // "auto", "builtin", "oneaifw"
+	PIIEngine              string `json:"pii_engine"`          // "auto", "builtin", "ner"
 	LogToFile              bool   `json:"log_to_file"`         // 是否将日志写入文件（默认只输出终端）
 	PlaceholderHashLength  int    `json:"placeholder_hash_length"` // 占位符哈希长度（6或8，默认6）
 	PlaceholderHMACKey     string `json:"placeholder_hmac_key"`    // HMAC密钥（空则用plain sha256）
 	LogLevel               string `json:"log_level"`               // 日志级别: "quiet", "info", "debug"
+
+	// PII 配置
+	PII PIIConfig `json:"pii"`
+}
+
+// PIIConfig PII 配置
+type PIIConfig struct {
+	Level              string            `json:"level"`                // "strict", "balanced", "minimal"
+	NEREnabled         bool              `json:"ner_enabled"`          // 是否启用 NER
+	NERMode            string            `json:"ner_mode"`             // "embedded"(CGO) 或 "remote"(Python服务)
+	NERModels          map[string]string `json:"ner_models"`           // 语言 -> 模型名
+	NERModelDir        string            `json:"ner_model_dir"`        // 模型目录
+	NERDownloadProxy   string            `json:"ner_download_proxy"`   // 下载代理
+	NERRemoteEndpoint  string            `json:"ner_remote_endpoint"`  // 远程 NER 服务地址
+	NERRemoteTimeout   string            `json:"ner_remote_timeout"`   // 远程 NER 超时
+	NERRemoteFallback  bool              `json:"ner_remote_fallback"`  // 远程 NER 不可用时降级
+	NERRemoteMaxRetry  int               `json:"ner_remote_max_retry"` // 远程 NER 最大重试次数
 }
 
 // PII 引擎状态
@@ -76,6 +88,7 @@ type Proxy struct {
 	piHandler        *pii.PIIHandler
 	localMasker      *pii.LocalMasker
 	builtInPII       *pii.BuiltInPIIDetector
+	nerDetector      *pii.NERDetector        // NER 检测器（可选）
 	sessMgr          *session.SessionManager
 	storage          storage.Storage
 	toolReg          *tools.ToolRegistry
@@ -85,9 +98,8 @@ type Proxy struct {
 	msgIdxMutex      sync.Mutex
 	apiKey           string             // CloseMask 自身的访问认证密钥
 	piiEngines       []piiEngineStatus  // PII 引擎状态列表
-	aifwAvailable    bool               // OneAIFW 是否可用
+	nerAvailable     bool               // NER 服务是否可用
 	activeEngine     string             // 当前活跃引擎名
-	oneaifwProcess   *os.Process        // OneAIFW 子进程（如果由 CloseMask 启动）
 }
 
 // redactPII 脱敏 PII 值，仅保留前后各 N 个字符
@@ -116,7 +128,7 @@ func truncateLog(v interface{}, maxLen int) string {
 
 // NewProxy 创建代理
 func NewProxy(config *Config) *Proxy {
-	piHandler := pii.NewPIIHandler(config.OneAIFWURL)
+	piHandler := pii.NewPIIHandler("") // 保留接口兼容
 
 	// 解析 TTL
 	sessionTTL, _ := time.ParseDuration(config.SessionTTL)
@@ -177,8 +189,28 @@ func NewProxy(config *Config) *Proxy {
 	// 初始化本地预扫描器
 	localMasker := pii.NewLocalMasker(config.LocalMaskLevel)
 
-	// 初始化内置 PII 检测器（开箱即用，不依赖 OneAIFW）
+	// 初始化内置 PII 检测器（开箱即用，不依赖外部服务）
 	builtInPII := pii.NewBuiltInPIIDetector()
+
+	// 初始化 NER 检测器（可选）
+	var nerDetector *pii.NERDetector
+	if config.PII.NEREnabled {
+		nerTimeout, _ := time.ParseDuration(config.PII.NERRemoteTimeout)
+		if nerTimeout == 0 {
+			nerTimeout = 5 * time.Second
+		}
+		nerDetector = pii.NewNERDetector(pii.NERConfig{
+			Enabled:         config.PII.NEREnabled,
+			Mode:            pii.NERMode(config.PII.NERMode),
+			ModelDir:        config.PII.NERModelDir,
+			Models:          config.PII.NERModels,
+			Timeout:         nerTimeout,
+			RemoteEndpoint:  config.PII.NERRemoteEndpoint,
+			RemoteFallback:  config.PII.NERRemoteFallback,
+			RemoteMaxRetry:  config.PII.NERRemoteMaxRetry,
+		})
+		LogInfof("NER 检测器已启用 (模式: %s)", config.PII.NERMode)
+	}
 
 	// 初始化确定性占位符生成器
 	hashLen := config.PlaceholderHashLength
@@ -195,7 +227,7 @@ func NewProxy(config *Config) *Proxy {
 
 	// 检测 PII 引擎状态
 	var engines []piiEngineStatus
-	aifwAvailable := false
+	nerAvailable := false
 	activeEngine := "builtin"
 
 	// 引擎 1: 内置正则凭据检测
@@ -216,51 +248,45 @@ func NewProxy(config *Config) *Proxy {
 		types:     builtinTypes,
 	})
 
-	// 引擎 3: OneAIFW（可选增强）
-	aifwEngine := piiEngineStatus{
-		name:      "oneaifw",
+	// 引擎 3: NER 服务（可选增强）
+	nerEngine := piiEngineStatus{
+		name:      "ner_service",
 		available: false,
-		types:     []string{"ALL (21+ types including NAME, ADDRESS, ORG)"},
-		reason:    "未配置或不可达",
+		types:     []string{"PER", "ORG", "LOC", "GPE"},
+		reason:    "未启用或不可达",
 	}
 
-	// 根据 pii_engine 配置决定是否尝试 OneAIFW
+	// 检查 NER 服务是否可用
 	piiEngine := config.PIIEngine
 	if piiEngine == "" {
 		piiEngine = "auto"
 	}
 
-	if piiEngine == "auto" || piiEngine == "oneaifw" {
-		if config.OneAIFWURL != "" {
-			// 检查 OneAIFW 是否已在运行
-			if checkOneAIFWRunning(config.OneAIFWURL) {
-				aifwEngine.available = true
-				aifwEngine.reason = ""
-				aifwAvailable = true
-				LogInfof("✅ OneAIFW 已在运行 (%s)", config.OneAIFWURL)
-			} else if tryStartOneAIFW(config.OneAIFWURL) {
-				// 尝试自动启动同目录的 OneAIFW
-				aifwEngine.available = true
-				aifwEngine.reason = ""
-				aifwAvailable = true
-				LogInfof("✅ OneAIFW 已自动启动 (%s)", config.OneAIFWURL)
+	if piiEngine == "auto" || piiEngine == "ner" {
+		if config.PII.NEREnabled && config.PII.NERRemoteEndpoint != "" {
+			// 检查 NER 服务是否在运行
+			if checkNERRunning(config.PII.NERRemoteEndpoint) {
+				nerEngine.available = true
+				nerEngine.reason = ""
+				nerAvailable = true
+				LogInfof("✅ NER 服务已在运行 (%s)", config.PII.NERRemoteEndpoint)
 			} else {
-				aifwEngine.reason = "服务不可达且无法自动启动"
-				LogInfof("⚠️ OneAIFW 不可用 (%s)，使用内置检测", aifwEngine.reason)
+				nerEngine.reason = "服务不可达"
+				LogInfof("⚠️ NER 服务不可用 (%s)，使用内置检测", nerEngine.reason)
 			}
 		} else {
-			aifwEngine.reason = "未配置 oneaifw_url"
-			if piiEngine == "oneaifw" {
-				LogInfof("⚠️ pii_engine=oneaifw 但未配置 oneaifw_url，降级到内置检测")
+			nerEngine.reason = "未启用 NER 服务"
+			if piiEngine == "ner" {
+				LogInfof("⚠️ pii_engine=ner 但未配置 NER 服务，降级到内置检测")
 			}
 		}
 	}
 
-	engines = append(engines, aifwEngine)
+	engines = append(engines, nerEngine)
 
 	// 决定活跃引擎
-	if aifwAvailable {
-		activeEngine = "oneaifw"
+	if nerAvailable {
+		activeEngine = "ner"
 	} else {
 		activeEngine = "builtin"
 	}
@@ -270,13 +296,14 @@ func NewProxy(config *Config) *Proxy {
 		piHandler:     piHandler,
 		localMasker:   localMasker,
 		builtInPII:    builtInPII,
+		nerDetector:   nerDetector,
 		sessMgr:       session.NewSessionManager(sessionTTL),
 		storage:       stor,
 		toolReg:       tools.NewToolRegistry(),
 		messageIdxMap: make(map[string]int),
 		apiKey:        config.APIKey,
 		piiEngines:    engines,
-		aifwAvailable: aifwAvailable,
+		nerAvailable:  nerAvailable,
 		activeEngine:  activeEngine,
 		httpClient: &http.Client{
 			Timeout: defaultHTTPTimeout,
@@ -360,67 +387,15 @@ func (p *Proxy) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// checkOneAIFWRunning 检查 OneAIFW 服务是否在运行
-func checkOneAIFWRunning(url string) bool {
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(url + "/health")
+// checkNERRunning 检查 NER 服务是否在运行
+func checkNERRunning(endpoint string) bool {
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(endpoint + "/health")
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
-}
-
-// tryStartOneAIFW 尝试自动启动同目录的 OneAIFW
-func tryStartOneAIFW(url string) bool {
-	// 查找可执行文件
-	exePath, err := os.Executable()
-	if err != nil {
-		return false
-	}
-	dir := filepath.Dir(exePath)
-
-	// 查找 oneaifw.exe (Windows) 或 oneaifw (Linux/Mac)
-	var oneaifwExe string
-	if runtime.GOOS == "windows" {
-		oneaifwExe = filepath.Join(dir, "oneaifw.exe")
-	} else {
-		oneaifwExe = filepath.Join(dir, "oneaifw")
-	}
-
-	if _, err := os.Stat(oneaifwExe); os.IsNotExist(err) {
-		// 尝试 Python 脚本方式
-		pyScript := filepath.Join(dir, "oneaifw", "aifw_service.py")
-		if _, err := os.Stat(pyScript); os.IsNotExist(err) {
-			return false
-		}
-		// 用 Python 启动
-		cmd := exec.Command("python", pyScript, "--port", "8845")
-		cmd.Dir = dir
-		if err := cmd.Start(); err != nil {
-			LogErrorf("自动启动 OneAIFW Python 服务失败: %v", err)
-			return false
-		}
-		LogInfof("🔄 已启动 OneAIFW Python 服务 (PID: %d)", cmd.Process.Pid)
-	} else {
-		// 用 exe 启动
-		cmd := exec.Command(oneaifwExe, "--port", "8845")
-		cmd.Dir = dir
-		if err := cmd.Start(); err != nil {
-			LogErrorf("自动启动 OneAIFW 可执行文件失败: %v", err)
-			return false
-		}
-		LogInfof("🔄 已启动 OneAIFW (PID: %d)", cmd.Process.Pid)
-	}
-
-	// 等待就绪（最多 15 秒）
-	for i := 0; i < 15; i++ {
-		time.Sleep(1 * time.Second)
-		if checkOneAIFWRunning(url) {
-			return true
-		}
-	}
-	return false
 }
 
 // PrintBanner 打印启动横幅
@@ -461,7 +436,7 @@ func (p *Proxy) PrintBanner() {
 			}
 		}
 	}
-	if p.aifwAvailable {
+	if p.nerAvailable {
 		capability = 100
 	} else if capability > 80 {
 		capability = 80
@@ -480,8 +455,8 @@ func (p *Proxy) PrintBanner() {
 	fmt.Println(capLine)
 
 	// 升级建议
-	if !p.aifwAvailable {
-		hint := "║  💡 配置 OneAIFW 可获得人名/组织/地址检测能力         ║"
+	if !p.nerAvailable {
+		hint := "║  💡 启用 NER 服务可获得人名/组织/地址检测能力          ║"
 		fmt.Println(hint)
 	}
 
@@ -535,9 +510,9 @@ func (p *Proxy) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 升级提示
-	if !p.aifwAvailable {
+	if !p.nerAvailable {
 		resp.UpgradeHints = append(resp.UpgradeHints,
-			"配置 OneAIFW 可检测人名/组织名/地址: https://github.com/funstory-ai/aifw")
+			"启用 NER 服务可检测人名/组织名/地址，详见 README.md")
 	}
 
 	// 状态码
@@ -552,9 +527,12 @@ func (p *Proxy) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-// checkAIFWHealth 检查 AIFW 服务健康
-func (p *Proxy) checkAIFWHealth() bool {
-	resp, err := p.healthClient.Get(p.config.OneAIFWURL + "/health")
+// checkNERHealth 检查 NER 服务健康
+func (p *Proxy) checkNERHealth() bool {
+	if p.config.PII.NERRemoteEndpoint == "" {
+		return false
+	}
+	resp, err := p.healthClient.Get(p.config.PII.NERRemoteEndpoint + "/health")
 	if err != nil {
 		return false
 	}
@@ -563,9 +541,11 @@ func (p *Proxy) checkAIFWHealth() bool {
 }
 
 // buildLLMURL 返回 LLM 请求 URL
-// llm_url 必须填完整端点地址（如 https://api.openai.com/v1/chat/completions）
+// llm_url 配置 base URL，自动追加 /chat/completions
+// 例如：https://api.openai.com/v1 → https://api.openai.com/v1/chat/completions
+//       https://qianfan.baidubce.com/v2/coding → https://qianfan.baidubce.com/v2/coding/chat/completions
 func (p *Proxy) buildLLMURL() string {
-	return strings.TrimRight(p.config.LLMURL, "/")
+	return strings.TrimRight(p.config.LLMURL, "/") + "/chat/completions"
 }
 
 // checkLLMHealth 检查 LLM 服务健康
@@ -648,9 +628,11 @@ func (p *Proxy) getNextMessageIndex(sessionID string) int {
 // makeRestoreFunc 创建带 storage 回填的还原函数
 func (p *Proxy) makeRestoreFunc(sess *session.Session, sessionID string) func(string) (string, bool) {
 	return func(placeholder string) (string, bool) {
+		// 1. 从 session 查找
 		if val, ok := sess.Restore(placeholder); ok {
 			return val, true
 		}
+		// 2. 从持久化存储查找
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		val, err := p.storage.GetPlaceholder(ctx, sessionID, placeholder)
@@ -711,7 +693,7 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			if msgMap, ok := msg.(map[string]interface{}); ok {
 				if content, ok := msgMap["content"].(string); ok && content != "" {
 					original := content
-					LogDebugf("≍ msg[%d] role=%s original=%q", i, msgMap["role"], original)
+					LogDebugf("[MASK] msg[%d] role=%s original=%q", i, msgMap["role"], original)
 
 					// 第一步：本地凭据预扫描（API Key/JWT/AWS Key 等）
 					localMasked := p.localMasker.Mask(content, func(placeholder, value string) {
@@ -719,7 +701,7 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 						if err := p.storage.SavePlaceholder(ctx, sessionID, placeholder, value); err != nil {
 							LogErrorf("保存本地遮罩占位符到存储失败: %v", err)
 						}
-						LogInfof("≍ %s -> %s (本地凭据, session=%s)", placeholder, redactPII(value), maskLogSID)
+						LogInfof("[MASK] %s -> %s (本地凭据, session=%s)", placeholder, redactPII(value), maskLogSID)
 					})
 
 					// 第二步：内置 PII 检测（手机号/身份证/邮箱/银行卡等）
@@ -728,7 +710,7 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 						if err := p.storage.SavePlaceholder(ctx, sessionID, placeholder, value); err != nil {
 							LogErrorf("保存内置PII占位符到存储失败: %v", err)
 						}
-						LogInfof("≍ %s -> %s (内置PII, session=%s)", placeholder, redactPII(value), maskLogSID)
+						LogInfof("[MASK] %s -> %s (内置PII, session=%s)", placeholder, redactPII(value), maskLogSID)
 					})
 
 					// 处理内置 PII 检测结果
@@ -753,48 +735,61 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 						_ = p.extractPlaceholders(localMasked, builtInMasked, builtInMeta, sess)
 					}
 
-					// 第三步：OneAIFW 遮罩（可选增强）
-					masked, maskMeta, err := p.piHandler.Mask(builtInMasked, "auto")
-					if err != nil {
-						if !p.piHandler.IsCircuitOpen() {
-							LogInfof("OneAIFW 遮罩失败（已由内置检测兜底）: %v", err)
-						}
-						if p.config.OneAIFWURL != "" && p.config.MaskFailStrategy == "block" {
-							LogInfof("[INFO] 内置PII检测已兜底，请求继续处理")
-						}
-					} else if masked != builtInMasked {
-						// OneAIFW 遮罩成功，需要重映射占位符
-						remasked := p.remapOneAIFWPlaceholders(masked, maskMeta)
-						messages[i].(map[string]interface{})["content"] = remasked
-
-						msgIdx := p.getNextMessageIndex(sessionID)
-						aifwLanguage := "en"
-						if containsChinese(builtInMasked) {
-							aifwLanguage = "zh"
-						}
-						maskMetaMgr.Add(msgIdx, aifwLanguage, maskMeta)
-
-						if err := p.storage.SaveMaskMeta(ctx, sessionID, &storage.MaskMeta{
-							MessageID: msgIdx,
-							Language:  aifwLanguage,
-							MaskMeta:  maskMeta,
-						}); err != nil {
-							LogErrorf("保存 maskMeta 到存储失败: %v", err)
-						}
-
-						placeholders := p.extractPlaceholders(builtInMasked, masked, maskMeta, sess)
-						for placeholder, value := range placeholders {
-							if err := p.storage.SavePlaceholder(ctx, sessionID, placeholder, value); err != nil {
-								LogErrorf("保存占位符到存储失败: %v", err)
-							}
-							LogInfof("≍ %s -> %s (OneAIFW, session=%s)", placeholder, redactPII(value), maskLogSID)
-						}
+				// 第三步：NER 服务遮罩（可选增强）
+				if p.nerAvailable && p.nerDetector != nil {
+					language := "en"
+					if containsChinese(builtInMasked) {
+						language = "zh"
 					}
+					nerMasked, err := p.nerDetector.DetectAndMaskWithNER(builtInMasked, language, func(placeholder, value string) {
+						sess.AddPlaceholder(placeholder, value)
+						if err := p.storage.SavePlaceholder(ctx, sessionID, placeholder, value); err != nil {
+							LogErrorf("保存 NER 占位符到存储失败: %v", err)
+						}
+						LogInfof("└ %s -> %s (NER, session=%s)", placeholder, redactPII(value), maskLogSID)
+					})
+					if err != nil {
+						LogInfof("NER 遮罩失败（已由内置检测兜底）: %v", err)
+					} else if nerMasked != builtInMasked {
+						messages[i].(map[string]interface{})["content"] = nerMasked
+					}
+				}
 
-					// 汇总日志
+				// 汇总日志
 					finalContent, _ := msgMap["content"].(string)
 					if finalContent != original {
-						LogInfof("≍ msg[%d] 遮罩完成: %d字 -> %d字 (session=%s)", i, len(original), len(finalContent), maskLogSID)
+						LogInfof("[MASK] msg[%d] 遮罩完成: %d字 -> %d字 (session=%s)", i, len(original), len(finalContent), maskLogSID)
+					}
+				}
+
+				// 处理 tool_calls 中的 arguments（历史对话中的工具调用参数）
+				if toolCalls, ok := msgMap["tool_calls"].([]interface{}); ok {
+					for _, tc := range toolCalls {
+						if tcMap, ok := tc.(map[string]interface{}); ok {
+							if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+								if args, ok := fn["arguments"].(string); ok && args != "" {
+									originalArgs := args
+									maskedArgs := p.maskPIIInJSON(args, sess, sessionID, ctx)
+									if maskedArgs != originalArgs {
+										fn["arguments"] = maskedArgs
+										LogInfof("  └ tool_calls.arguments 遮罩完成 (session=%s)", maskLogSID)
+									}
+								}
+							}
+						}
+					}
+				}
+
+				// 处理 role="tool" 的消息内容（工具返回结果）
+				if role, ok := msgMap["role"].(string); ok && role == "tool" {
+					if content, ok := msgMap["content"].(string); ok && content != "" {
+						originalContent := content
+						// 工具返回结果也需要遮罩
+						maskedContent := p.maskContent(content, sess, sessionID, ctx)
+						if maskedContent != originalContent {
+							msgMap["content"] = maskedContent
+							LogInfof("  └ tool result 遮罩完成: %d字 -> %d字 (session=%s)", len(originalContent), len(maskedContent), maskLogSID)
+						}
 					}
 				}
 			}
@@ -853,7 +848,6 @@ func (p *Proxy) injectSystemPrompt(reqBody map[string]interface{}, sess *session
 }
 
 // extractPlaceholders 从遮罩结果中提取占位符并保存映射
-// OneAIFW 返回的占位符格式 ${PHONE_0} 需要重映射为确定性占位符 ${PHONE_hash6}
 func (p *Proxy) extractPlaceholders(original, masked, maskMeta string, sess *session.Session) map[string]string {
 	placeholders := make(map[string]string)
 
@@ -873,12 +867,10 @@ func (p *Proxy) extractPlaceholders(original, masked, maskMeta string, sess *ses
 				// 生成确定性占位符
 				newPlaceholder := pii.GeneratePlaceholder(piiItem.Type, piiItem.Value)
 
-				// 如果 OneAIFW 的占位符与确定性占位符不同，需要在 masked 文本中替换
-				if piiItem.Placeholder != newPlaceholder {
+								if piiItem.Placeholder != newPlaceholder {
 					// 替换在 session 中的映射
 					// (extractPlaceholders 的调用方会在 masked 文本中做替换)
-					LogDebugf("OneAIFW重映射: %s -> %s (value=%s)", piiItem.Placeholder, newPlaceholder, redactPII(piiItem.Value))
-				}
+									}
 
 				sess.AddPlaceholder(newPlaceholder, piiItem.Value)
 				placeholders[newPlaceholder] = piiItem.Value
@@ -890,31 +882,7 @@ func (p *Proxy) extractPlaceholders(original, masked, maskMeta string, sess *ses
 	return placeholders
 }
 
-// remapOneAIFWPlaceholders 在 masked 文本中将 OneAIFW 占位符替换为确定性占位符
-func (p *Proxy) remapOneAIFWPlaceholders(masked, maskMeta string) string {
-	var meta struct {
-		PII []struct {
-			Type       string `json:"type"`
-			Value      string `json:"value"`
-			Placeholder string `json:"placeholder"`
-		} `json:"pii"`
-	}
 
-	if err := json.Unmarshal([]byte(maskMeta), &meta); err != nil {
-		return masked
-	}
-
-	result := masked
-	for _, piiItem := range meta.PII {
-		if piiItem.Placeholder != "" && piiItem.Value != "" {
-			newPlaceholder := pii.GeneratePlaceholder(piiItem.Type, piiItem.Value)
-			if piiItem.Placeholder != newPlaceholder {
-				result = strings.ReplaceAll(result, piiItem.Placeholder, newPlaceholder)
-			}
-		}
-	}
-	return result
-}
 
 // handleStreamingRequest 处理流式请求
 func (p *Proxy) handleStreamingRequest(w http.ResponseWriter, r *http.Request, reqBody map[string]interface{}, sess *session.Session) {
@@ -1221,4 +1189,86 @@ func isPartialPlaceholder(s string) bool {
 	}
 	// 不是有效占位符，可能是哈希被截断
 	return true
+}
+
+// maskContent 遮罩文本内容中的 PII（复用现有的三级遮罩逻辑）
+func (p *Proxy) maskContent(content string, sess *session.Session, sessionID string, ctx context.Context) string {
+	// 第一步：本地凭据预扫描
+	localMasked := p.localMasker.Mask(content, func(placeholder, value string) {
+		sess.AddPlaceholder(placeholder, value)
+		if err := p.storage.SavePlaceholder(ctx, sessionID, placeholder, value); err != nil {
+			LogErrorf("保存本地遮罩占位符到存储失败: %v", err)
+		}
+	})
+
+	// 第二步：内置 PII 检测
+	builtInMasked, _ := p.builtInPII.DetectAndMask(localMasked, func(placeholder, value string) {
+		sess.AddPlaceholder(placeholder, value)
+		if err := p.storage.SavePlaceholder(ctx, sessionID, placeholder, value); err != nil {
+			LogErrorf("保存内置PII占位符到存储失败: %v", err)
+		}
+	})
+
+	// 第三步：NER 服务遮罩（可选）
+	if p.nerAvailable && p.nerDetector != nil {
+		language := "en"
+		if containsChinese(builtInMasked) {
+			language = "zh"
+		}
+		nerMasked, _ := p.nerDetector.DetectAndMaskWithNER(builtInMasked, language, func(placeholder, value string) {
+			sess.AddPlaceholder(placeholder, value)
+			if err := p.storage.SavePlaceholder(ctx, sessionID, placeholder, value); err != nil {
+				LogErrorf("保存 NER 占位符到存储失败: %v", err)
+			}
+		})
+		return nerMasked
+	}
+	return builtInMasked
+}
+
+// maskPIIInJSON 遮罩 JSON 字符串中所有字符串值中的 PII
+// 用于处理 tool_calls.arguments 等嵌套 JSON 结构
+func (p *Proxy) maskPIIInJSON(jsonStr string, sess *session.Session, sessionID string, ctx context.Context) string {
+	// 尝试解析为 JSON
+	var data interface{}
+	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+		// 不是有效 JSON，直接作为字符串遮罩
+		return p.maskContent(jsonStr, sess, sessionID, ctx)
+	}
+
+	// 递归遮罩 JSON 中的所有字符串值
+	maskedData := p.maskJSONValue(data, sess, sessionID, ctx)
+
+	// 重新序列化
+	result, err := json.Marshal(maskedData)
+	if err != nil {
+		return p.maskContent(jsonStr, sess, sessionID, ctx)
+	}
+	return string(result)
+}
+
+// maskJSONValue 递归遮罩 JSON 值中的字符串
+func (p *Proxy) maskJSONValue(value interface{}, sess *session.Session, sessionID string, ctx context.Context) interface{} {
+	switch v := value.(type) {
+	case string:
+		// 对字符串值执行 PII 遮罩
+		return p.maskContent(v, sess, sessionID, ctx)
+	case map[string]interface{}:
+		// 递归处理对象
+		result := make(map[string]interface{})
+		for key, val := range v {
+			result[key] = p.maskJSONValue(val, sess, sessionID, ctx)
+		}
+		return result
+	case []interface{}:
+		// 递归处理数组
+		result := make([]interface{}, len(v))
+		for i, val := range v {
+			result[i] = p.maskJSONValue(val, sess, sessionID, ctx)
+		}
+		return result
+	default:
+		// 其他类型（数字、布尔、null）不变
+		return value
+	}
 }

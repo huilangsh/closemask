@@ -62,6 +62,8 @@ CloseMask provides three levels of PII detection capability:
 
 **Auto-discovery**: CloseMask automatically detects and starts OneAIFW if `oneaifw.exe` or `oneaifw/aifw_service.py` is found in the same directory.
 
+**OneAIFW Health Check**: `GET /api/health` → `{"status": "ok"}`
+
 ### 1. LocalMasker (Local Regex Masking)
 
 **Responsibilities**:
@@ -121,15 +123,18 @@ When a line contains `KEY_NAME=value` pattern and the key name matches known cre
 
 CloseMask uses the OpenAI-compatible protocol (`/v1/chat/completions`) to communicate with upstream LLM providers. This design choice enables broad compatibility:
 
+**`llm_url` is the base URL. CloseMask automatically appends `/chat/completions`:**
+
 | Provider Type | Connection Method | Example `llm_url` |
 |---------------|-------------------|-------------------|
 | OpenAI | Direct | `https://api.openai.com/v1` |
 | Azure OpenAI | Direct | `https://{resource}.openai.azure.com/...` |
-| Ollama | Direct | `http://localhost:11434` |
+| Ollama | Direct | `http://localhost:11434/v1` |
 | Groq | Direct | `https://api.groq.com/openai/v1` |
-| DeepSeek | Direct | `https://api.deepseek.com/v1` |
+| DeepSeek | Direct | `https://api.deepseek.com` |
+| Baidu Qianfan Coding | Direct | `https://qianfan.baidubce.com/v2/coding` |
 | Anthropic Claude | Via proxy | `http://localhost:3000/v1` (one-api) |
-| Other compatible | Direct | Corresponding base URL |
+| Other compatible | Direct | base URL |
 
 For Anthropic Claude, an OpenAI-compatible proxy layer (such as [one-api](https://github.com/songquanpeng/one-api), [LiteLLM](https://github.com/BerriAI/litellm), or [OpenRouter](https://openrouter.ai/)) is required since Anthropic's native API uses a different protocol format (`/v1/messages`). The proxy layer handles protocol conversion while CloseMask focuses on PII protection.
 
@@ -251,9 +256,14 @@ Where:
 - Cleanup: Background goroutine periodically removes expired disk files
 - Recovery: On startup, loads persistent data from disk
 
+**Placeholder Storage**:
+- Placeholders stored in `{data_dir}/placeholders/{PII_TYPE}/{HASH_PREFIX}.json`
+- Query `${CRED_33xxx}` only reads `CRED/33.json` file
+- Supports millions of placeholders with efficient lookup
+
 **Disk Storage**:
-- Files stored under `{data_dir}/{session_id}/` directory
-- Background cleanup removes expired session directories
+- Files stored under `{data_dir}/sessions/` directory
+- Background cleanup removes expired session files
 - Atomic file writes via temp file + rename
 
 ## Data Flow

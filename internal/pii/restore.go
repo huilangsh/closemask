@@ -21,9 +21,14 @@ const unrecoverablePlaceholder = "[PII-UNRECOVERABLE]"
 // LLM 改为其他括号: [PHONE_a1b2c3], {PHONE_a1b2c3}, (PHONE_a1b2c3), <PHONE_a1b2c3>
 // LLM 保留部分: PHONE_a1b2c3}, ${PHONE_a1b2c3
 //
+// 注意：此正则仅用于修复非标准格式。标准格式 ${TYPE_hash} 不应被修改。
 // 捕获组1: TYPE（大写字母+下划线）
 // 捕获组2: hash（6-8位hex）
 var fuzzyNewPlaceholderRe = regexp.MustCompile(`(?:\$\{|[<{\[(])([A-Z][A-Z_]{1,})_([a-f0-9]{6,8})(?:\}|[>}\])])?`)
+
+// standardPlaceholderRe 匹配标准格式占位符 ${TYPE_hash}
+// 用于快速检测，避免 fuzzy 正则误处理
+var standardPlaceholderRe = regexp.MustCompile(`\$\{[A-Z][A-Z_]{1,}_[a-f0-9]{6,8}\}`)
 
 // ============ 旧格式 fuzzy 正则（向后兼容 ${CRED_N}）============
 // 匹配 LLM 可能输出的各种 ${CRED_N} 占位符变体
@@ -158,27 +163,41 @@ func NormalizePlaceholders(text string) string {
 		return text
 	}
 
+	// 在函数内部编译正则表达式，确保正确初始化
+	standardRe := regexp.MustCompile(`\$\{[A-Z][A-Z_]{1,}_[a-f0-9]{6,8}\}`)
+	
+	// 先提取所有标准格式占位符，保护它们不被 fuzzy 正则误处理
+	standardPlaceholders := standardRe.FindAllString(text, -1)
+	standardMap := make(map[string]bool)
+	for _, p := range standardPlaceholders {
+		standardMap[p] = true
+	}
+
 	result := text
 
-	// 1. 先修复新格式的 fuzzy 变体
+	// 1. 先修复新格式的 fuzzy 变体（跳过已是标准格式的）
 	result = fuzzyNewPlaceholderRe.ReplaceAllStringFunc(result, func(match string) string {
+		// 如果已经是标准格式，直接返回
+		if standardMap[match] {
+			return match
+		}
 		submatch := fuzzyNewPlaceholderRe.FindStringSubmatch(match)
 		if len(submatch) < 3 {
 			return match
 		}
 		piType := submatch[1]
 		hash := submatch[2]
-		// 如果已经是标准格式 ${TYPE_hash}，不修改
-		standard := "${" + piType + "_" + hash + "}"
-		if match == standard {
-			return match
-		}
 		// 修复为标准格式
+		standard := "${" + piType + "_" + hash + "}"
 		return standard
 	})
 
 	// 2. 再修复旧格式的 fuzzy 变体（向后兼容）
+	// 注意：fuzzyLegacyPlaceholderRe 可能错误匹配新格式的一部分（如 ${CRED_5）
+	// 需要检查匹配结果是否是标准格式的一部分
 	result = fuzzyLegacyPlaceholderRe.ReplaceAllStringFunc(result, func(match string) string {
+		// 检查匹配结果后面是否紧跟着 hex 字符（说明是新格式的一部分）
+		// 如果是，跳过
 		submatch := fuzzyLegacyPlaceholderRe.FindStringSubmatch(match)
 		if len(submatch) < 2 {
 			return match
@@ -187,6 +206,24 @@ func NormalizePlaceholders(text string) string {
 		standard := "${CRED_" + num + "}"
 		if match == standard {
 			return match
+		}
+		// 检查：如果 match 后面紧跟着 hex 字符（a-f0-9），说明是新格式的一部分，跳过
+		// 例如：${CRED_5 后面是 c2a9c}，说明是 ${CRED_5c2a9c} 的一部分
+		// 通过检查原始文本中 match 后面的字符来判断
+		matchIdx := strings.Index(result, match)
+		if matchIdx != -1 {
+			afterMatch := ""
+			if matchIdx+len(match) < len(result) {
+				afterMatch = result[matchIdx+len(match):]
+			}
+			// 如果后面紧跟 hex 字符，跳过
+			if len(afterMatch) > 0 {
+				firstChar := afterMatch[0]
+				if (firstChar >= 'a' && firstChar <= 'f') || (firstChar >= '0' && firstChar <= '9') {
+					// 是新格式的一部分，跳过
+					return match
+				}
+			}
 		}
 		return standard
 	})

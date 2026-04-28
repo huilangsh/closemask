@@ -239,7 +239,7 @@ closemask.exe -config config.json
 最小配置 `config.json`：
 ```json
 {
-  "llm_url": "http://localhost:11434"
+  "llm_url": "http://localhost:11434/v1"
 }
 ```
 
@@ -277,7 +277,7 @@ python -m aifw launch
 然后在 `config.json` 中配置：
 ```json
 {
-  "llm_url": "http://localhost:11434",
+  "llm_url": "http://localhost:11434/v1",
   "oneaifw_url": "http://localhost:8845",
   "pii_engine": "auto"
 }
@@ -336,7 +336,7 @@ curl -X POST http://localhost:8846/v1/chat/completions \
 ```json
 {
   "oneaifw_url": "http://localhost:8845",
-  "llm_url": "http://localhost:11434",
+  "llm_url": "http://localhost:11434/v1",
   "port": 8846,
   "storage_type": "layered",
   "session_ttl": "24h",
@@ -355,7 +355,7 @@ curl -X POST http://localhost:8846/v1/chat/completions \
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `llm_url` | `http://localhost:11434` | LLM 提供商地址（**必填**） |
+| `llm_url` | - | LLM 提供商的 base URL（**必填**，CloseMask 自动追加 `/chat/completions`） |
 | `port` | `8846` | 代理监听端口 |
 | `api_key` | 空 | CloseMask 自身认证密钥（用 `X-CloseMask-Key` 头传递）。**LLM 的 API Key 不用填这里**，直接在请求中用 `Authorization` 头传递，CloseMask 会自动透传给 LLM |
 | `storage_type` | `layered` | 存储类型：memory/disk/layered/redis |
@@ -390,17 +390,21 @@ curl -X POST http://localhost:8846/v1/chat/completions \
 
 ### LLM 提供商兼容性
 
-CloseMask 采用 **OpenAI 兼容协议**，支持所有 OpenAI 兼容的 LLM 提供商。**`llm_url` 必须填完整端点地址**：
+CloseMask 采用 **OpenAI 兼容协议**，支持所有 OpenAI 兼容的 LLM 提供商。
 
-| 提供商 | `llm_url` 配置 |
-|--------|---------------|
-| **OpenAI** | `https://api.openai.com/v1/chat/completions` |
-| **Ollama** | `http://localhost:11434/v1/chat/completions` |
-| **Groq** | `https://api.groq.com/openai/v1/chat/completions` |
-| **DeepSeek** | `https://api.deepseek.com/chat/completions` |
-| **通义千问** | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` |
-| **Moonshot Kimi** | `https://api.moonshot.cn/v1/chat/completions` |
-| **智谱 GLM** | `https://open.bigmodel.cn/api/coding/paas/v4/chat/completions` |
+**`llm_url` 填写 base URL，CloseMask 自动追加 `/chat/completions`。**
+
+| 提供商 | `llm_url` 配置示例 |
+|--------|-------------------|
+| **OpenAI** | `https://api.openai.com/v1` |
+| **Ollama** | `http://localhost:11434/v1` |
+| **Groq** | `https://api.groq.com/openai/v1` |
+| **DeepSeek** | `https://api.deepseek.com` |
+| **通义千问** | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| **百度千帆 Coding** | `https://qianfan.baidubce.com/v2/coding` |
+| **京东云 Coding** | `https://modelservice.jdcloud.com/coding/openai/v1` |
+| **Moonshot Kimi** | `https://api.moonshot.cn/v1` |
+| **智谱 GLM** | `https://open.bigmodel.cn/api/coding/paas/v4` |
 | **Azure OpenAI** | 见下方说明 |
 | **Anthropic Claude** | 通过 OpenAI 兼容代理（见下方说明） |
 | **其他** | 查阅官方文档，填完整端点地址 |

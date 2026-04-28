@@ -33,3 +33,11 @@ closemask
 closemask.exe
 /dist/
 /bin/
+
+# Sensitive data
+data/
+logs/
+*.log
+
+# Config with potential secrets
+config.json

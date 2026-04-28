@@ -516,7 +516,7 @@ kubectl scale deployment closemask --replicas=5
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
 | `CLOSEMASK_CONFIG` | 配置文件路径 | `./config.json` |
-| `CLOSEMASK_LLM_URL` | LLM API 基础 URL | `https://api.openai.com/v1` |
+| `CLOSEMASK_LLM_URL` | LLM API base URL | `https://api.openai.com/v1` |
 | `CLOSEMASK_API_KEY` | CloseMask 认证密钥（`X-CloseMask-Key` 头） | - |
 | `CLOSEMASK_REDIS_ADDR` | Redis 地址 | `localhost:6379` |
 | `CLOSEMASK_LOG_LEVEL` | 日志级别 | `info` |

@@ -4,16 +4,18 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"sync"
 	"time"
 )
 
 // LayeredStorage 分层存储实现：内存（热数据）+ 磁盘（冷数据）
 type LayeredStorage struct {
-	hot      *MemoryStorage
-	cold     *DiskStorage
-	asyncWg  sync.WaitGroup
-	stopChan chan struct{}
+	hot               *MemoryStorage
+	cold              *DiskStorage
+	placeholderStorage *PlaceholderStorage // 占位符存储（按类型+hash分文件夹）
+	asyncWg           sync.WaitGroup
+	stopChan          chan struct{}
 }
 
 // NewLayeredStorage 创建分层存储
@@ -24,10 +26,18 @@ func NewLayeredStorage(dataDir string, messageTTL, sessionTTL time.Duration) (*L
 	}
 	hot := NewMemoryStorage(messageTTL, sessionTTL)
 
+	// 创建占位符存储（按类型+hash分文件夹）
+	placeholderDir := filepath.Join(dataDir, "placeholders")
+	placeholderStorage, err := NewPlaceholderStorage(placeholderDir)
+	if err != nil {
+		return nil, fmt.Errorf("创建占位符存储失败: %w", err)
+	}
+
 	ls := &LayeredStorage{
-		hot:      hot,
-		cold:     cold,
-		stopChan: make(chan struct{}),
+		hot:               hot,
+		cold:              cold,
+		placeholderStorage: placeholderStorage,
+		stopChan:          make(chan struct{}),
 	}
 	go ls.asyncSyncLoop()
 	return ls, nil
@@ -150,49 +160,52 @@ func (ls *LayeredStorage) DeleteMaskMeta(ctx context.Context, sessionID string) 
 }
 
 // ============ 占位符操作 ============
+// 注意：占位符使用全局存储（按类型+hash分文件夹），不区分 sessionID
 
 func (ls *LayeredStorage) SavePlaceholder(ctx context.Context, sessionID string, placeholder, value string) error {
+	// 1. 写入内存缓存
 	if err := ls.hot.SavePlaceholder(ctx, sessionID, placeholder, value); err != nil {
 		return err
 	}
+	// 2. 异步持久化到磁盘（按类型+hash分文件夹）
 	ls.asyncWg.Add(1)
 	go func() {
 		defer ls.asyncWg.Done()
-		if err := ls.cold.SavePlaceholder(context.Background(), sessionID, placeholder, value); err != nil {
-			log.Printf("[WARN] 异步写入冷存储(SavePlaceholder)失败: %v", err)
+		if err := ls.placeholderStorage.SavePlaceholder(context.Background(), placeholder, value); err != nil {
+			log.Printf("[WARN] 异步持久化占位符失败: %v", err)
 		}
 	}()
 	return nil
 }
 
 func (ls *LayeredStorage) GetPlaceholder(ctx context.Context, sessionID string, placeholder string) (string, error) {
+	// 1. 先从内存缓存查找
 	val, err := ls.hot.GetPlaceholder(ctx, sessionID, placeholder)
 	if err == nil {
 		return val, nil
 	}
-	placeholders, err := ls.cold.GetAllPlaceholders(ctx, sessionID)
+	// 2. 从磁盘存储查找（按类型+hash分文件夹）
+	val, err = ls.placeholderStorage.GetPlaceholder(ctx, placeholder)
 	if err != nil {
 		return "", err
 	}
-	for k, v := range placeholders {
-		_ = ls.hot.SavePlaceholder(ctx, sessionID, k, v)
-	}
-	val, exists := placeholders[placeholder]
-	if !exists {
-		return "", fmt.Errorf("占位符不存在")
-	}
+	// 3. 回填到内存缓存
+	_ = ls.hot.SavePlaceholder(ctx, sessionID, placeholder, val)
 	return val, nil
 }
 
 func (ls *LayeredStorage) GetAllPlaceholders(ctx context.Context, sessionID string) (map[string]string, error) {
+	// 1. 先从内存缓存查找
 	placeholders, err := ls.hot.GetAllPlaceholders(ctx, sessionID)
 	if err == nil && len(placeholders) > 0 {
 		return placeholders, nil
 	}
-	placeholders, err = ls.cold.GetAllPlaceholders(ctx, sessionID)
+	// 2. 从磁盘存储查找（全局占位符）
+	placeholders, err = ls.placeholderStorage.GetAllPlaceholders(ctx)
 	if err != nil {
 		return nil, err
 	}
+	// 3. 回填到内存缓存
 	for k, v := range placeholders {
 		_ = ls.hot.SavePlaceholder(ctx, sessionID, k, v)
 	}
@@ -200,16 +213,24 @@ func (ls *LayeredStorage) GetAllPlaceholders(ctx context.Context, sessionID stri
 }
 
 func (ls *LayeredStorage) DeletePlaceholders(ctx context.Context, sessionID string) error {
-	err1 := ls.hot.DeletePlaceholders(ctx, sessionID)
-	ls.asyncWg.Add(1)
-	go func() {
-		defer ls.asyncWg.Done()
-		if err := ls.cold.DeletePlaceholders(context.Background(), sessionID); err != nil {
-			log.Printf("[WARN] 异步删除冷存储(DeletePlaceholders)失败: %v", err)
-		}
-	}()
-	if err1 != nil {
-		return err1
+	// 清空内存缓存
+	_ = ls.hot.DeletePlaceholders(ctx, sessionID)
+	// 注意：全局占位符存储不按 sessionID 删除，保留持久化数据
+	// 如需清空所有占位符，请使用 DeleteAllPlaceholders
+	return nil
+}
+
+// DeleteAllPlaceholders 清空所有占位符（全局）
+func (ls *LayeredStorage) DeleteAllPlaceholders(ctx context.Context) error {
+	// 清空内存缓存
+	ls.hot.mu.Lock()
+	for sid := range ls.hot.sessions {
+		delete(ls.hot.sessions, sid)
+	}
+	ls.hot.mu.Unlock()
+	// 清空磁盘存储
+	if ls.placeholderStorage != nil {
+		return ls.placeholderStorage.ClearAll()
 	}
 	return nil
 }
@@ -275,6 +296,9 @@ func (ls *LayeredStorage) Close() error {
 	}
 	if err := ls.cold.Close(); err != nil {
 		return err
+	}
+	if ls.placeholderStorage != nil {
+		_ = ls.placeholderStorage.Close()
 	}
 	return nil
 }

@@ -1,5 +1,5 @@
 #!/bin/bash
-# CloseMask - 编译脚本 v2.3
+# CloseMask - 编译脚本 v0.9.3
 
 set -e
 
@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo "========================================"
-echo "  CloseMask - 编译脚本 v2.3"
+echo "  CloseMask - 编译脚本 v0.9.3"
 echo "========================================"
 echo ""
 

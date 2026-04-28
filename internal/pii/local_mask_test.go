@@ -215,3 +215,210 @@ func TestRestoreArgs_FullStringMatch(t *testing.T) {
 		t.Errorf("Full string match should work, got: %s", key)
 	}
 }
+
+// ===== Aggressive 值格式匹配测试 =====
+
+func TestLocalMasker_Aggressive_PkUUID(t *testing.T) {
+	lm := NewLocalMasker("aggressive")
+	placeholders := make(map[string]string)
+	result := lm.Mask("my key is pk-1148a252-026e-4aa3-a69f-ab16eef56a3e here", func(p, v string) {
+		placeholders[p] = v
+	})
+
+	if strings.Contains(result, "pk-1148a252-026e-4aa3-a69f-ab16eef56a3e") {
+		t.Errorf("pk-UUID should be masked, got: %s", result)
+	}
+	if len(placeholders) == 0 {
+		t.Error("Should have at least one placeholder for pk-UUID")
+	}
+	for _, v := range placeholders {
+		if v == "pk-1148a252-026e-4aa3-a69f-ab16eef56a3e" {
+			return // found
+		}
+	}
+	t.Error("pk-UUID value should be preserved in placeholder map")
+}
+
+func TestLocalMasker_Aggressive_SkPrefix(t *testing.T) {
+	lm := NewLocalMasker("aggressive")
+	placeholders := make(map[string]string)
+	result := lm.Mask("key: sk-proj-abc123def4567890abcdefghij", func(p, v string) {
+		placeholders[p] = v
+	})
+
+	if strings.Contains(result, "sk-proj-abc123def4567890abcdefghij") {
+		t.Errorf("sk- prefix key should be masked, got: %s", result)
+	}
+	if len(placeholders) == 0 {
+		t.Error("Should have at least one placeholder for sk- key")
+	}
+}
+
+func TestLocalMasker_Aggressive_UUIDOnly(t *testing.T) {
+	lm := NewLocalMasker("aggressive")
+	placeholders := make(map[string]string)
+	result := lm.Mask("uuid: 1148a252-026e-4aa3-a69f-ab16eef56a3e", func(p, v string) {
+		placeholders[p] = v
+	})
+
+	if strings.Contains(result, "1148a252-026e-4aa3-a69f-ab16eef56a3e") {
+		t.Errorf("Standalone UUID should be masked, got: %s", result)
+	}
+	if len(placeholders) == 0 {
+		t.Error("Should have at least one placeholder for standalone UUID")
+	}
+}
+
+func TestLocalMasker_Aggressive_JSON_ApiKey(t *testing.T) {
+	lm := NewLocalMasker("aggressive")
+	placeholders := make(map[string]string)
+	input := `"apiKey": "pk-1148a252-026e-4aa3-a69f-ab16eef56a3e"`
+	result := lm.Mask(input, func(p, v string) {
+		placeholders[p] = v
+	})
+
+	if strings.Contains(result, "pk-1148a252-026e-4aa3-a69f-ab16eef56a3e") {
+		t.Errorf("JSON apiKey value should be masked, got: %s", result)
+	}
+	if !strings.Contains(result, `"apiKey":`) {
+		t.Errorf("Key name should be preserved, got: %s", result)
+	}
+}
+
+func TestLocalMasker_Strict_NoAggressiveValMatch(t *testing.T) {
+	lm := NewLocalMasker("strict")
+	placeholders := make(map[string]string)
+	// 独立的 pk-UUID 在 strict 模式下不应被遮罩（没有键名关联）
+	result := lm.Mask("random text pk-1148a252-026e-4aa3-a69f-ab16eef56a3e here", func(p, v string) {
+		placeholders[p] = v
+	})
+
+	if strings.Contains(result, "${CRED_") {
+		t.Errorf("Strict mode should not mask pk-UUID without key name, got: %s", result)
+	}
+}
+
+// ===== 英文场景综合测试 =====
+
+func TestEnglish_PhoneInSentence(t *testing.T) {
+	detector := NewBuiltInPIIDetector()
+	placeholders := make(map[string]string)
+	result, _ := detector.DetectAndMask("My phone number is 13912345678, please call me.", func(p, v string) {
+		placeholders[p] = v
+	})
+	if strings.Contains(result, "13912345678") {
+		t.Errorf("Phone should be masked, got: %s", result)
+	}
+	if len(placeholders) == 0 {
+		t.Error("Phone should be detected")
+	}
+}
+
+func TestEnglish_EmailInSentence(t *testing.T) {
+	detector := NewBuiltInPIIDetector()
+	placeholders := make(map[string]string)
+	result, _ := detector.DetectAndMask("Please send the report to john.doe@example.com before Friday.", func(p, v string) {
+		placeholders[p] = v
+	})
+	if strings.Contains(result, "john.doe@example.com") {
+		t.Errorf("Email should be masked, got: %s", result)
+	}
+}
+
+func TestEnglish_IDCardNoPhoneFalsePositive(t *testing.T) {
+	detector := NewBuiltInPIIDetector()
+	placeholders := make(map[string]string)
+	result, _ := detector.DetectAndMask("The customer ID is 110101199003076534, please verify.", func(p, v string) {
+		placeholders[p] = v
+	})
+	// 身份证号应该被遮罩
+	if strings.Contains(result, "110101199003076534") {
+		t.Errorf("ID card should be masked, got: %s", result)
+	}
+	// 不应该有 PHONE 占位符（身份证号中的子串不应被误检为手机号）
+	for k, v := range placeholders {
+		if strings.HasPrefix(k, "${PHONE_") {
+			t.Errorf("ID card should not produce PHONE placeholder, got: %s -> %s", k, v)
+		}
+	}
+}
+
+func TestEnglish_MultiPII(t *testing.T) {
+	detector := NewBuiltInPIIDetector()
+	placeholders := make(map[string]string)
+	result, _ := detector.DetectAndMask("Contact John at john@example.com or call 13912345678.", func(p, v string) {
+		placeholders[p] = v
+	})
+	if strings.Contains(result, "john@example.com") {
+		t.Errorf("Email should be masked, got: %s", result)
+	}
+	if strings.Contains(result, "13912345678") {
+		t.Errorf("Phone should be masked, got: %s", result)
+	}
+}
+
+func TestEnglish_Aggressive_ApiKey(t *testing.T) {
+	lm := NewLocalMasker("aggressive")
+	placeholders := make(map[string]string)
+	result := lm.Mask(`{"apiKey": "pk-1148a252-026e-4aa3-a69f-ab16eef56a3e", "model": "gpt-4"}`, func(p, v string) {
+		placeholders[p] = v
+	})
+	if strings.Contains(result, "pk-1148a252-026e-4aa3-a69f-ab16eef56a3e") {
+		t.Errorf("API key should be masked, got: %s", result)
+	}
+}
+
+func TestEnglish_Aggressive_SkPrefix(t *testing.T) {
+	lm := NewLocalMasker("aggressive")
+	placeholders := make(map[string]string)
+	result := lm.Mask("I accidentally committed sk-proj-abc123def4567890abcdefghij to the repo!", func(p, v string) {
+		placeholders[p] = v
+	})
+	if strings.Contains(result, "sk-proj-abc123def4567890abcdefghij") {
+		t.Errorf("sk- key should be masked, got: %s", result)
+	}
+}
+
+func TestEnglish_Aggressive_BearerJWT(t *testing.T) {
+	lm := NewLocalMasker("aggressive")
+	placeholders := make(map[string]string)
+	result := lm.Mask("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U", func(p, v string) {
+		placeholders[p] = v
+	})
+	if strings.Contains(result, "eyJhbGci") {
+		t.Errorf("JWT should be masked, got: %s", result)
+	}
+}
+
+func TestEnglish_Aggressive_AWSKey(t *testing.T) {
+	lm := NewLocalMasker("aggressive")
+	placeholders := make(map[string]string)
+	result := lm.Mask("My AWS access key is AKIAIOSFODNN7EXAMPLE for production.", func(p, v string) {
+		placeholders[p] = v
+	})
+	if strings.Contains(result, "AKIAIOSFODNN7EXAMPLE") {
+		t.Errorf("AWS AK should be masked, got: %s", result)
+	}
+}
+
+func TestEnglish_IPAddress(t *testing.T) {
+	detector := NewBuiltInPIIDetector()
+	placeholders := make(map[string]string)
+	result, _ := detector.DetectAndMask("Server IP is 192.168.1.100, internal only.", func(p, v string) {
+		placeholders[p] = v
+	})
+	if strings.Contains(result, "192.168.1.100") {
+		t.Errorf("IP address should be masked, got: %s", result)
+	}
+}
+
+func TestEnglish_BankCard(t *testing.T) {
+	detector := NewBuiltInPIIDetector()
+	placeholders := make(map[string]string)
+	result, _ := detector.DetectAndMask("Card number 6222021234567890123, please charge.", func(p, v string) {
+		placeholders[p] = v
+	})
+	if strings.Contains(result, "6222021234567890123") {
+		t.Errorf("Bank card should be masked, got: %s", result)
+	}
+}

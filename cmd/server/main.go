@@ -83,9 +83,6 @@ func loadConfig(path string) (*proxy.Config, error) {
 	if config.Port == 0 {
 		config.Port = 8846
 	}
-	if config.OneAIFWURL == "" {
-		config.OneAIFWURL = "http://localhost:8845"
-	}
 	if config.LLMURL == "" {
 		config.LLMURL = "http://localhost:11434"
 	}
@@ -117,9 +114,6 @@ func loadConfig(path string) (*proxy.Config, error) {
 		config.LogLevel = "info"
 	}
 
-	if v := os.Getenv("CLOSEMASK_ONEAIFW_URL"); v != "" {
-		config.OneAIFWURL = v
-	}
 	if v := os.Getenv("CLOSEMASK_LLM_URL"); v != "" {
 		config.LLMURL = v
 	}

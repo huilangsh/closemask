@@ -21,7 +21,7 @@ type PlaceholderGenerator struct {
 // hash: sha256/hmac-sha256 的前 hashLength 位 hex
 
 // placeholderRegex 匹配标准占位符格式 ${TYPE_hash}
-// TYPE: 至少2的大写字母或下划线
+// TYPE: 至少2个大写字母或下划线
 // hash: 6或8位hex
 var placeholderRegex = regexp.MustCompile(`^\$\{([A-Z][A-Z_]{1,})_([a-f0-9]{6,8})\}$`)
 

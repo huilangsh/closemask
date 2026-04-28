@@ -3,7 +3,7 @@ chcp 65001 >nul 2>&1
 title CloseMask - 编译脚本
 
 echo ========================================
-echo   CloseMask - 编译脚本 v2.3
+echo   CloseMask - 编译脚本 v0.9.4
 echo ========================================
 echo.
 
